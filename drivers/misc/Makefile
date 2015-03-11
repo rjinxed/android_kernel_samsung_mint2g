@@ -66,3 +66,4 @@ obj-$(CONFIG_BTHID)		+= bthid.o
 obj-y		+= sprd_vsp/
 obj-y		+= sprd_busmonitor/
 obj-y		+= sprd_cproc/
+obj-$(CONFIG_UID_CPUTIME) += uid_cputime.o
