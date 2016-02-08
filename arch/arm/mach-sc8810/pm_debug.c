@@ -52,12 +52,14 @@ static int irq_status = 0;
 
 /*sleep mode*/
 static int sleep_mode = SLP_MODE_NON;
+/*
 static char * sleep_mode_str[]  = {
 	"[ARM]",
 	"[MCU]",
 	"[DEP]",
 	"[NON]"
 };
+*/
 
 #define INT_REG(off) (SPRD_INTCV_BASE + (off))
 
@@ -112,6 +114,7 @@ static void print_hard_irq(void)
 }
 
 /*irqs for ddi.c*/
+/*
 static void irq_reset(void)
 {
 	int i = SPRD_IRQ_NUM - 1;
@@ -119,6 +122,7 @@ static void irq_reset(void)
 		sprd_irqs[i] = 0;
 	}while(--i >= 0);
 }
+*/
 
 void inc_irq(int irq)
 {
