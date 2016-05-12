@@ -1455,32 +1455,31 @@ nk_xirq_unmask (NkXIrq xirq)
      * IRQ chip operations
      */
 
-/* add extern to fix link failures with  gcc-5.x+ -psych.half */
-    extern inline void
+    inline void
 __nk_xirq_mask (struct irq_data *id)
 {
     _xirq_emask_clear(&nkdev.xenabled, id->irq);
 }
 
-    extern inline void
+    inline void
 __nk_xirq_unmask (struct irq_data *id)
 {
     _xirq_emask_set(&nkdev.xenabled, id->irq);
 }
 
-    extern inline void
+    inline void
 __nk_xirq_ack (struct irq_data *id)
 {
 }
 
-    extern inline unsigned int
+    inline unsigned int
 __nk_xirq_startup(struct irq_data *id)
 {
     _xirq_emask_set(&nkdev.xenabled, id->irq);
     return 0;
 }
 
-    extern inline void
+    inline void
 __nk_xirq_shutdown(struct irq_data *id)
 {
     _xirq_emask_clear(&nkdev.xenabled, id->irq);

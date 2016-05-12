@@ -133,8 +133,7 @@ static struct ktermios*      serial_termios_locked[MAX_PORT];
  *	3/ The cons_ops for the traditional driver
  */
 
-/* suppress gcc warning -psych.half */
-static int use_only_console_output __attribute__((unused));
+static int use_only_console_output;
 
 /*
  * history related ops

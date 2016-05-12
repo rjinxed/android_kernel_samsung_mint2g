@@ -9,9 +9,6 @@
 #ifndef __STC3115_BATTERY_H_
 #define __STC3115_BATTERY_H_
 
-// add missing include -psych.half
-#include <linux/power_supply.h>
-
 struct stc311x_platform_data {
 	int (*battery_online)(void);
 	int (*charger_online)(void);
