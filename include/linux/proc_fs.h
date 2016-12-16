@@ -253,20 +253,6 @@ extern const struct proc_ns_operations utsns_operations;
 extern const struct proc_ns_operations ipcns_operations;
 extern const struct proc_ns_operations mntns_operations;
 
-struct nsproxy;
-struct proc_ns_operations {
- struct {
- unsigned int len;
- const char *name;
- } name;
- unsigned int name_len;
- void *(*get)(struct task_struct *task);
- void (*put)(void *ns);
- int (*install)(struct nsproxy *nsproxy, void *ns);
-};
-#define PROC_NSNAME(NAME) { .name = (NAME), .len = (sizeof(NAME) - 1), }
-extern struct file *proc_ns_fget(int fd);
-
 union proc_op {
 	int (*proc_get_link)(struct inode *, struct path *);
 	int (*proc_read)(struct task_struct *task, char *page);
