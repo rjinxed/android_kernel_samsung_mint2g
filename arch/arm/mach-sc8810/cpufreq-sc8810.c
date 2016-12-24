@@ -356,38 +356,6 @@ ssize_t sprd_vdd_get(char *buf) {
 	return len;
 }
 
-void sprd_vdd_set(const char *buf) {
-	int ret = -EINVAL;
-	int i = 0;
-	int j = 0;
-	int u[MIN_CL + 1];
-	while (j < MIN_CL + 1) {
-		int consumed;
-		int val;
-		ret = sscanf(buf, "%d%n", &val, &consumed);
-		if (ret > 0) {
-			buf += consumed;
-			u[j++] = val;
-		}
-		else {
-			break;
-		}
-	}
-
-	for (i = 0; i < j; i++) {
-		if (u[i] > ARMVOLT_MAX / 1000) {
-			u[i] = ARMVOLT_MAX / 1000;
-		}
-         if( u[i] % 25 == 0 ) {
-		 sprd_cpufreq_conf->vdduv_tbl[i] = u[i] * 1000; }
-	}
-   return;
-}
-
-static struct vdd_levels_control sprd_vdd_control = {
-      .get = sprd_vdd_get,
-      .set = sprd_vdd_set,
-};
 
 static struct cpufreq_driver sprd_cpufreq_driver = {
 	.verify		= sprd_cpufreq_verify_speed,
@@ -397,7 +365,6 @@ static struct cpufreq_driver sprd_cpufreq_driver = {
 	.exit		= sprd_cpufreq_exit,
 	.name		= "cpufreq_sc8810",
 	.attr		= sprd_cpufreq_attr,
-	.volt_control = &sprd_vdd_control ,
 };
 
 
