@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Spreadtrum Communications Inc.
+ * Copyright (C) 2016 Psych Half, <psych.half@gmail.com>
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -9,434 +9,338 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ * 
  */
 
-#include <linux/jiffies.h>
-#include <linux/mutex.h>
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/types.h>
-#include <linux/init.h>
+#include <linux/sched.h>
 #include <linux/cpufreq.h>
 #include <linux/delay.h>
+#include <linux/init.h>
 #include <linux/err.h>
 #include <linux/clk.h>
-#include <linux/regulator/consumer.h>
-#include <linux/workqueue.h>
-#include <linux/completion.h>
+#include <linux/io.h>
+#include <linux/debugfs.h>
 #include <linux/cpu.h>
-#include <linux/cpumask.h>
-#include <linux/sched.h>
-#include <linux/suspend.h>
-#include <linux/bitops.h>
+#include <linux/regulator/consumer.h>
+#include <asm/system.h>
+#include <trace/events/power.h>
+
 #include <mach/hardware.h>
 #include <mach/regulator.h>
-
-#define DELTA 				msecs_to_jiffies(1000)
-#define FREQ_TABLE_ENTRY		(4)
-
-/*
- *   Cpu freqency is not be scaled yet, because of reasons of stablily.
- *   But we still define CONFIG_CPU_FREQ for some APKs, they will
- *display BogoMIPS instead of the real cpu frequency if CONFIG_CPU_FREQ
- *is not be defined
- */
-static int cpufreq_bypass = 1;
-
-/*
- *  sc8810+ indicator
- */
-static int sc8810_plus = 0;
-
-struct sprd_dvfs_table {
-	unsigned long  clk_mcu_mhz;
-	unsigned long  vdd_mcu_mv;
-};
-
-static struct sprd_dvfs_table sc8810g_dvfs_table[] = {
-	[0] = { 1000000 , 1200000 }, /* 1000,000KHz,  1200mv */
-	[1] = { 600000 , 1100000 },  /* 600,000KHz,  1100mv */
-	[2] = { 400000 , 1100000 },  /* 400,000KHz,  1100mv */
-};
-
-static struct sprd_dvfs_table sc8810g_plus_dvfs_table[] = {
-	[0] = { 1200000 , 1300000 }, /* 1200,000KHz,  1300mv */
-	[1] = { 1000000 , 1200000 }, /* 1000,000KHz,  1200mv */
-	[2] = { 600000 , 1100000 },  /* 600,000KHz,  1100mv */
-};
-//modified by xing wei for mint
-struct cpufreq_frequency_table sc8810g_freq_table[FREQ_TABLE_ENTRY];
-extern int global_cpufreq_min_limit;
-extern int global_cpufreq_max_limit;
-extern spinlock_t  g_cpufreq_lock;
-//end //modified by xing wei
-enum scalable_cpus {
-	CPU0 = 0,
-};
-
-struct scalable {
-	int 				cpu;
-	struct clk			*clk;
-	struct regulator		*vdd;
-	struct cpufreq_frequency_table	*freq_tbl;
-	struct sprd_dvfs_table		*dvfs_tbl;
-};
-
-struct scalable scalable_sc8810[] = {
-	[CPU0] = {
-		.cpu		= CPU0,
-		.freq_tbl	= sc8810g_freq_table,
-		.dvfs_tbl	= sc8810g_dvfs_table,
-	},
-};
-
-struct sprd_dvfs_table current_cfg[] = {
-	[CPU0] = {
-		.clk_mcu_mhz = 0,
-		.vdd_mcu_mv = 0,
-	},
-};
-static unsigned int last_time[NR_CPUS];
+#include <mach/adi.h>
 
 
-struct clock_state {
-	struct sprd_dvfs_table  current_para;
-	struct mutex			lock;
-}drv_state;
+/* 
+ * Cortex-A5 has a single clock source. AHB and AXI are derived from the MCU. 
+ * But access to MCU in sc8810 is disabled by Spreadtrum. 
+ * There is no register to enable it.
+ *
+ * So we just get hold of the MPLL and change it directly.
+ * However this means we cannot change the AHB and AXI clocks.
+ * The AHB and AXI get clock dividers are 4 and  2 respectively.
+ *
+ * So going anything below 600Mhz, will slow the whole system and memory bus.
+ * In other words, lags like hell.
+ *
+ * We do not know other side effects of changing the MPLL directly, yet.
+ *
+ */ 
 
-#ifdef CONFIG_SMP
-struct cpufreq_work_struct {
-	struct work_struct work;
-	struct cpufreq_policy *policy;
-	struct completion complete;
-	unsigned int index;
-	int frequency;
-	int status;
-};
-
-static DEFINE_PER_CPU(struct cpufreq_work_struct, cpufreq_work);
-static struct workqueue_struct *sprd_cpufreq_wq;
-#endif
-
-struct cpufreq_suspend_t {
-	struct mutex suspend_mutex;
-	int device_suspended;
-};
-
-static DEFINE_PER_CPU(struct cpufreq_suspend_t, cpufreq_suspend);
+/* voltage constraints */
+#define ARMVOLT_MAX (1400 * 1000)
+#define ARMVOLT_MIN  (650 * 1000)
 
 
-#ifdef CONFIG_SMP
-static void set_cpu_work(struct work_struct *work)
-{
-	struct cpufreq_work_struct *cpu_work =
-		container_of(work, struct cpufreq_work_struct, work);
+#define FREQ_TABLE_SIZE 	(11)
+/* overly estimated value of 10ms */
+#define TRANSITION_LATENCY	(10 * 1000 * 1000)
 
-	cpu_work->status = set_cpu_freq(cpu_work->policy, cpu_work->frequency);
-	complete(&cpu_work->complete);
-}
-#endif
+/* 
+ * WAIT_BOOT_TIME: (seconds)
+ * 	We do not change frequency at early boot up and let the clock stabilize first. 
+ * WAIT_TRANS_TIME: (msecs)
+ * 	Changing frequency is a very costly operation due to extensive locking. 
+ * So we limit actual transistions regardless of the transistion  latency.
+ */ 
+#define WAIT_BOOT_TIME         (52)
+#define WAIT_TRANS_TIME		(100)
 
-/*@return: Hz*/
-static unsigned long cpu_clk_get_rate(int cpu){
-	struct clk *mcu_clk = NULL;
-	unsigned long clk_rate = 0;
+static DEFINE_MUTEX(freq_lock);
+struct cpufreq_freqs global_freqs; 
+unsigned long boot_time,trans_time;
+
+/* just for initalization, these will be calculated from the frequency table */
+unsigned int freq_min_limit = 600000;
+unsigned int freq_max_limit = 1000000;
+
+struct cpufreq_conf {
+	struct clk		*clk;
+	struct regulator 	*regulator;
+	struct cpufreq_frequency_table		*freq_tbl;
+	unsigned long		*vdduv_tbl;
 	
-	mcu_clk = scalable_sc8810[cpu].clk;
-	clk_rate = clk_get_rate(mcu_clk);
+};
 
-	if(clk_rate < 0){
-		pr_err("!!!%s cpu%u frequency is %lu\n", __func__, cpu, clk_rate);
+struct cpufreq_table_data {
+	struct cpufreq_frequency_table 		freq_tbl[FREQ_TABLE_SIZE];
+	unsigned long				vdduv_tbl[FREQ_TABLE_SIZE];
+};
+
+enum clocking_levels {
+	OC5,OC4,OC3,OC2,OC1,	/* over clock */
+	NOC, UC0=NOC, OC0=NOC,	/* no over or under clock */
+	UC1, UC2, UC3, UC4,	/* under clock */
+	MAX_CL=OC5,MIN_CL=UC4,
+	EC, 			/* end of clocking */
+};
+
+static struct cpufreq_table_data sc8810_cpufreq_table_data = {
+	/* multiplier should be a multiple of 4 to allow efficient scaling */
+	.freq_tbl = {		/* M*25 */
+		{OC5, 1500000}, /*  60  */
+		{OC4, 1400000}, /*  56  */
+		{OC3, 1300000},	/*  52  */
+		{OC2, 1200000},	/*  48  */
+		{OC1, 1100000},	/*  44  */
+		{NOC, 1000000},	/*  40  */
+		{UC1, 900000},  /*  36  */
+		{UC2, 800000},  /*  32  */
+		{UC3, 700000},  /*  28  */
+		{UC4, 600000},  /*  24  */
+		{EC, CPUFREQ_TABLE_END},
+	},
+	/* 50mV steps */
+	.vdduv_tbl = {
+	[OC5] =	1100000,
+	[OC4] = 1050000,
+	[OC3] =	1000000,
+	[OC2] =	950000,
+	[OC1] =	900000,
+	[NOC] =	850000,
+	[UC1] =	800000,
+	[UC2] =	750000,
+	[UC3] =	700000,
+	[UC4] =	650000,
+	[EC] =	1100000,
+	},
+};
+
+struct cpufreq_conf sc8810_cpufreq_conf = {
+	.clk = NULL,
+	.regulator = NULL,
+	.freq_tbl = NULL,
+	.vdduv_tbl = NULL ,	
+};
+
+struct cpufreq_conf *sprd_cpufreq_conf = NULL;
+
+
+
+
+/* clk and regulator api works, so no need to mess with registers */
+static inline unsigned long sprd_raw_getfreq(void) {
+	return (clk_get_rate(sprd_cpufreq_conf->clk)  / 1000 );
+}
+
+static inline unsigned long sprd_raw_getvolt(void) {
+	return ( regulator_get_voltage(sprd_cpufreq_conf->regulator));
+}
+
+/* do  not call the these functions directly.*/
+static inline int sprd_raw_setfreq(unsigned int freq_khz) {	
+	return clk_set_rate(sprd_cpufreq_conf->clk, freq_khz*1000 );
+}
+
+static inline int sprd_raw_setvolt(unsigned long vdd_uv) {
+	return regulator_set_voltage(sprd_cpufreq_conf->regulator, vdd_uv, vdd_uv);
+}
+
+
+/* function to find index when cpufreq core gives us wrong index */
+static inline void sprd_find_freqtbl_index (unsigned long freq, unsigned int *index) {
+	 int i = MAX_CL;
+/* fallback frequency  */
+     *index = NOC;
+
+/* ignore the whole target relation crap and use integer division */
+/* this should give a frequency pretty close to target */
+
+    // TODO: optimize this loop with MAX_CL, MIN_CL, and NOC
+	while ( i <= MIN_CL) {
+		if ((sprd_cpufreq_conf->freq_tbl[i].frequency / 100000 ) == (freq / 100000 ))
+			*index = i;
+             i++;
 	}
-	return clk_rate;
 }
 
-static int set_mcu_vdd(int cpu, unsigned long vdd_mcu_uv){
-
-	int ret = 0;
-	struct regulator *vdd = scalable_sc8810[cpu].vdd;
-	if(vdd)
-		ret = regulator_set_voltage(vdd, vdd_mcu_uv, vdd_mcu_uv);
-	else
-		pr_err("!!!! %s,  no vdd !!!!\n", __func__);
-	if(ret){
-		pr_err("!!!! %s, set voltage error:%d !!!!\n", __func__, ret);
-		return ret;
-	}	
-    return ret;
-
-}
-
-static int set_mcu_freq(int cpu, unsigned long mcu_freq_hz){
-	int ret;
-	unsigned long freq_mcu_hz = mcu_freq_hz * 1000;
-	struct clk *clk = scalable_sc8810[cpu].clk;
-	ret = clk_set_rate(clk, freq_mcu_hz);
-	if(ret){
-		pr_err("!!!! %s, clk_set_rate:%d !!!!\n", __func__, ret);
-	}
-    return ret;
-}
-
-static int cpu_set_freq_vdd(struct cpufreq_policy *policy, unsigned long mcu_clk, unsigned long mcu_vdd)
+/* generic cpufreq functions  */
+static int sprd_cpufreq_verify_speed(struct cpufreq_policy *policy)
 {
-	unsigned int ret;
-	unsigned long cpu = policy->cpu;
-	struct clk *clk = scalable_sc8810[cpu].clk;
-	//unsigned long cur_clk = clk_get_rate(clk) / 1000;
-	unsigned long cur_clk = current_cfg[cpu].clk_mcu_mhz;
-
-	if(mcu_clk > cur_clk){
-	//	ret = set_mcu_vdd(cpu, mcu_vdd);
-		ret = set_mcu_freq(cpu, mcu_clk);
-	}
-	if(mcu_clk < cur_clk){
-		ret = set_mcu_freq(cpu, mcu_clk);
-	//	ret = set_mcu_vdd(cpu, mcu_vdd);
+	if (policy->cpu) {
+		pr_err("cpufreq_verify:  no such cpu id %d\n", policy->cpu);
+		return -EINVAL;
 	}
 
-	current_cfg[cpu].clk_mcu_mhz = mcu_clk;
-	current_cfg[cpu].vdd_mcu_mv  = mcu_vdd;
-
-	return ret;
+	return cpufreq_frequency_table_verify(policy, sprd_cpufreq_conf->freq_tbl);
 }
 
+static int sprd_cpufreq_target(struct cpufreq_policy *policy,
+		unsigned int target_freq, unsigned int relation )
+{
+	unsigned int index = NOC;
+	unsigned long new_freq, new_volt;
 
-static int sprd_cpufreq_set_rate(struct cpufreq_policy *policy, int index){
-	int ret = 0;
-	if(cpufreq_bypass)
-		return ret;
+	unsigned int flags = 0;
+	unsigned long cur_freq, cur_volt;
 
-	struct cpufreq_freqs freqs;
-	struct sprd_dvfs_table *dvfs_tbl = scalable_sc8810[policy->cpu].dvfs_tbl;
-	unsigned int new_freq = dvfs_tbl[index].clk_mcu_mhz;
-	unsigned int new_vdd = dvfs_tbl[index].vdd_mcu_mv;
-	freqs.old = policy->cur;
-	freqs.new = new_freq;
-	freqs.cpu = policy->cpu;
-	if(new_freq == current_cfg[policy->cpu].clk_mcu_mhz){
+	if(time_before(jiffies, boot_time)){
+		pr_debug("cpufreq_target: skipping request to scale frequency at early boot %lu %lu", jiffies, boot_time);
+		return 0;
+	}
+	if(time_before(jiffies, trans_time )){
+		pr_debug("waiting %ums before changing frequency" , 
+				jiffies_to_msecs(trans_time-jiffies));
 		return 0;
 	}
 
-	if(time_before(jiffies, last_time[policy->cpu]+DELTA)    &&
-		new_freq < current_cfg[policy->cpu].clk_mcu_mhz  ){
-		printk("%s, set rate in 1s(this_time:%u, last_time:%u), skip\n",
-					__func__, jiffies, last_time[policy->cpu] );
-		return ret;
+	/* bail early if requested frequency is above limits */	
+	if((target_freq < freq_min_limit ) || (target_freq > freq_max_limit ))
+	{
+		pr_err("cpufreq_target: invalid target_freq: %u min_limit %u max_limit %d\n", target_freq,
+				freq_max_limit, freq_min_limit );
+		return -EINVAL;
 	}
-	printk("%s, old_freq:%lu KHz, old_vdd:%lu uv  \n", __func__,
-			current_cfg[policy->cpu].clk_mcu_mhz, current_cfg[policy->cpu].vdd_mcu_mv);
 
-	cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
-	ret = cpu_set_freq_vdd(policy, new_freq, new_vdd);
-	if (!ret){
-		cpufreq_notify_transition(&freqs, CPUFREQ_POSTCHANGE);
-		policy->cur = new_freq;
-		current_cfg[policy->cpu].clk_mcu_mhz = new_freq;
-		printk("%s, new_freq:%lu KHz, new_vdd:%lu uv \n", __func__,
-				current_cfg[policy->cpu].clk_mcu_mhz, current_cfg[policy->cpu].vdd_mcu_mv);
-	}
-	if(policy->cur == policy->max){
-		last_time[policy->cpu] = jiffies;
-	}
-	return ret;
+	cpufreq_frequency_table_target(policy,sprd_cpufreq_conf->freq_tbl, target_freq, relation,&index);
 
+	pr_debug("cpufreq_target: CPU%d target %d policy min,max (%d-%d)",
+			policy->cpu, target_freq,
+			policy->min, policy->max);
+
+	new_freq = target_freq;
+
+	mutex_lock(&freq_lock);
+
+	if (target_freq == global_freqs.old) {
+		mutex_unlock(&freq_lock);
+		return 0;
+	}
+
+	/* check if we got the right index in the frequency table */
+	if(target_freq != sprd_cpufreq_conf->freq_tbl[index].frequency) {
+ 	sprd_find_freqtbl_index(target_freq,&index);
+     new_freq = sprd_cpufreq_conf->freq_tbl[index].frequency;
+	}
+
+    global_freqs.new = new_freq;
+	new_volt =  sprd_cpufreq_conf->vdduv_tbl[index];
+
+	pr_info("check_setfreq: perpare to set %lu khz , %luuV for cpu%u\n",
+			new_freq, new_volt, policy->cpu);
+
+		cpufreq_notify_transition(&global_freqs, CPUFREQ_PRECHANGE);
+
+	/* The below locking part is very critical, a spinlock won't suffice here. 
+	 * We need to disable the second OS from taking the CPU.
+	 * So we must use the VLX specific hw_local_irq lock.
+	 * Which is a very heavvy lock, so we  try to hold it for a very short time.
+	 * */
+	flags = hw_local_irq_save();
+	cur_freq =  sprd_raw_getfreq();
+	if (new_freq != cur_freq) {
+	if (new_freq > cur_freq)
+	sprd_raw_setvolt(new_volt );
+	sprd_raw_setfreq(new_freq);
+	if (new_freq < cur_freq)
+	sprd_raw_setvolt(new_volt);
+	}
+	cur_freq = sprd_raw_getfreq();
+	cur_volt = sprd_raw_getvolt();
+	hw_local_irq_restore(flags);
+
+	if (new_freq == cur_freq && new_volt == cur_volt)   {
+		new_volt=cur_volt;
+		new_freq=cur_freq;
+		pr_info("setting suceessful new values: freq %luMHz volt: %lumV \n", new_freq/1000, new_volt/1000);	
+	} else {
+		new_volt=cur_volt;
+		new_freq=cur_freq;
+		pr_info("setting fail current values: freq %luMHz volt: %lumV \n", new_freq/1000, new_volt/1000);	
 }
 
-static int sc8810_is_plus(int cpu){
-	int cpu_clk = 0;
-	int sc8810_is_plus = 0;
+	cpufreq_notify_transition(&global_freqs, CPUFREQ_POSTCHANGE);
 
-	cpu_clk = cpu_clk_get_rate(cpu);
-	/*
-	 * sc8810+ runs at 1.2GHz
-	 */
-	if(cpu_clk == 1200000000)
-		sc8810_is_plus =  1;
+	global_freqs.old = global_freqs.new;
+	trans_time = jiffies + msecs_to_jiffies(WAIT_TRANS_TIME);
 
-	return sc8810_is_plus;
-}
+	mutex_unlock(&freq_lock);
 
-static int sc8810_cpufreq_table_init( void ){
-	int cnt;
-	int cpu = 0;
-
-	scalable_sc8810[cpu].cpu = cpu;
-	scalable_sc8810[cpu].clk = clk_get(NULL, "mpll_ck");
-	scalable_sc8810[cpu].vdd = regulator_get(NULL, "VDDARM");
-	if( scalable_sc8810[cpu].clk == NULL ||
-		scalable_sc8810[cpu].vdd == NULL ){
-		pr_err("%s, cpu:%d, clk:%p, vdd:%p\n", __func__, cpu,
-				scalable_sc8810[cpu].clk, scalable_sc8810[cpu].vdd);
-		return -1;
-	}
-
-	if (sc8810g_freq_table == NULL) {
-		printk(" cpufreq: No frequency information for this CPU\n");
-		return -1;
-	}
-
-	sc8810_plus = sc8810_is_plus(cpu);
-	for (cnt = 0; cnt < FREQ_TABLE_ENTRY-1; cnt++) {
-		sc8810g_freq_table[cnt].index = cnt;
-		if(!sc8810_plus)
-			sc8810g_freq_table[cnt].frequency = sc8810g_dvfs_table[cnt].clk_mcu_mhz;
-		else
-			sc8810g_freq_table[cnt].frequency = sc8810g_plus_dvfs_table[cnt].clk_mcu_mhz;
-	}
-	sc8810g_freq_table[cnt].index = cnt;
-	sc8810g_freq_table[cnt].frequency = CPUFREQ_TABLE_END;
-
-	scalable_sc8810[cpu].freq_tbl = sc8810g_freq_table;
-	if(sc8810_plus)
-		scalable_sc8810[cpu].dvfs_tbl = sc8810g_plus_dvfs_table;
-
-
-	for (cnt = 0; cnt < FREQ_TABLE_ENTRY; cnt++) {
-		pr_debug("%s, scalable_sc8810[cpu].freq_tbl[%d].index:%d\n", __func__, cnt,
-				scalable_sc8810[cpu].freq_tbl[cnt].index);
-		pr_debug("%s, scalable_sc8810[cpu].freq_tbl[%d].frequency:%d\n", __func__, cnt,
-				scalable_sc8810[cpu].freq_tbl[cnt].frequency);
-	}
 	return 0;
 }
 
-static int sprd_cpufreq_verify_speed(struct cpufreq_policy *policy)
+static unsigned int sprd_cpufreq_getspeed(unsigned int cpu)
 {
-	if (policy->cpu != 0)
+	if (cpu)
 		return -EINVAL;
 
-	return cpufreq_frequency_table_verify(policy, scalable_sc8810[policy->cpu].freq_tbl);
-
+	return sprd_raw_getfreq();
 }
 
-/*@return: KHz*/
-static unsigned int sprd_cpufreq_get_speed(unsigned int cpu)
+static void sprd_gen_freq_table(void)
 {
-	return cpu_clk_get_rate(cpu) / 1000;
+
+	/* initalize frequency table */
+	sprd_cpufreq_conf->freq_tbl = sc8810_cpufreq_table_data.freq_tbl;
+	sprd_cpufreq_conf->vdduv_tbl = sc8810_cpufreq_table_data.vdduv_tbl;
+
+	/* set min and max frequency */
+	freq_max_limit = sprd_cpufreq_conf->freq_tbl[MAX_CL].frequency;
+
+	freq_min_limit = sprd_cpufreq_conf->freq_tbl[MIN_CL].frequency;
+
+	pr_info("gen_freq_table:  min limit=%dKhz, max limit=%dKhz \n" , freq_min_limit, freq_max_limit);
+
+	return;
 }
 
-static int sprd_cpufreq_set_target(struct cpufreq_policy *policy,
-				unsigned int target_freq,
-				unsigned int relation)
-{
-		int ret = -EFAULT;
-		int index;
-		struct cpufreq_frequency_table *table;
-#ifdef CONFIG_SMP
-		struct cpufreq_work_struct *cpu_work = NULL;
-		cpumask_var_t mask;
-
-		if (!alloc_cpumask_var(&mask, GFP_KERNEL))
-			return -ENOMEM;
-
-		if (!cpu_active(policy->cpu)) {
-			pr_info("cpufreq: cpu %d is not active.\n", policy->cpu);
-			return -ENODEV;
-		}
-#endif
-
-//added by xing wei for mint
-		//wrong logic ...
-		//if (global_cpufreq_max_limit == -1 || global_cpufreq_min_limit ==  -1) {
-		//	printk(" !!!we no need to change\n");
-		//	return 0;	// just return do not need to change clock and vdd
-		//}
-		printk("! before target_feq %u ---", target_freq);
-		spin_lock(&g_cpufreq_lock);
-		if (target_freq > global_cpufreq_max_limit && global_cpufreq_max_limit != -1)
-			target_freq = global_cpufreq_max_limit;
-		if (target_freq < global_cpufreq_min_limit && global_cpufreq_min_limit != -1)
-			target_freq = global_cpufreq_min_limit;
-		spin_unlock(&g_cpufreq_lock);
-		printk("now target_feq %u \n", target_freq);
-//end //added by xing wei
-		mutex_lock(&per_cpu(cpufreq_suspend, policy->cpu).suspend_mutex);
-
-		if (per_cpu(cpufreq_suspend, policy->cpu).device_suspended) {
-			printk("cpufreq: cpu%d scheduling frequency change "
-					"in suspend.\n", policy->cpu);
-			ret = -EFAULT;
-			goto done;
-		}
-
-		table = cpufreq_frequency_get_table(policy->cpu);
-
-		if (cpufreq_frequency_table_target(policy, table, target_freq, relation,
-				&index)) {
-			pr_err("cpufreq: invalid target_freq: %d\n", target_freq);
-			ret = -EINVAL;
-			goto done;
-		}
-
-#ifdef CONFIG_CPU_FREQ_DEBUG
-		pr_debug("CPU[%d] target %d relation %d (%d-%d) selected %d\n",
-			policy->cpu, target_freq, relation,
-			policy->min, policy->max, table[index].frequency);
-#endif
-
-#ifdef CONFIG_SMP
-		cpu_work = &per_cpu(cpufreq_work, policy->cpu);
-		cpu_work->policy = policy;
-		cpu_work->frequency = table[index].frequency;
-		cpu_work->status = -ENODEV;
-		cpu_work->index = index;
-
-		cpumask_clear(mask);
-		cpumask_set_cpu(policy->cpu, mask);
-		if (cpumask_equal(mask, &current->cpus_allowed)) {
-			//ret = set_cpu_freq(cpu_work->policy, cpu_work->frequency);
-			ret = sprd_cpufreq_set_rate(cpu_work->policy, cpu_work->index);
-			goto done;
-		} else {
-			cancel_work_sync(&cpu_work->work);
-			INIT_COMPLETION(cpu_work->complete);
-			queue_work_on(policy->cpu, sprd_cpufreq_wq, &cpu_work->work);
-			wait_for_completion(&cpu_work->complete);
-		}
-
-		free_cpumask_var(mask);
-		ret = cpu_work->status;
-#else
-		ret = sprd_cpufreq_set_rate(policy, index);
-#endif
-
-	done:
-
-		mutex_unlock(&per_cpu(cpufreq_suspend, policy->cpu).suspend_mutex);
-		return ret;
-
-}
-
-static int sprd_cpufreq_driver_init(struct cpufreq_policy *policy)
+static int sprd_cpufreq_init(struct cpufreq_policy *policy)
 {
 	int ret;
-#ifdef CONFIG_SMP
-	struct cpufreq_work_struct *cpu_work = NULL;
-#endif
 
-	ret = sc8810_cpufreq_table_init( );
-	if(ret){
-		return -ENODEV;
-	}
-	
-	policy->cur = cpu_clk_get_rate(policy->cpu) / 1000; /* current cpu frequency : KHz*/
-	policy->cpuinfo.transition_latency = 1 * 1000 * 1000;//why this value??
+	/* get the actual frequency, first */
+	policy->cur = sprd_raw_getfreq();
 
-#ifdef CONFIG_CPU_FREQ_STAT_DETAILS
-	cpufreq_frequency_table_get_attr(scalable_sc8810[policy->cpu].freq_tbl, policy->cpu);
-#endif
+	policy->cpuinfo.transition_latency = TRANSITION_LATENCY;
 
-	ret = cpufreq_frequency_table_cpuinfo(policy, scalable_sc8810[policy->cpu].freq_tbl);
-	if (ret != 0) {
-		pr_err("cpufreq: Failed to configure frequency table: %d\n", ret);
+	ret=cpufreq_frequency_table_cpuinfo(policy, sprd_cpufreq_conf->freq_tbl);
+
+
+	if (ret) {
+		pr_err("cpufreq_init: failed to config freq table: %d\n", ret);
+		return ret;
 	}
 
-#ifdef CONFIG_SMP
-	cpu_work = &per_cpu(cpufreq_work, policy->cpu);
-	INIT_WORK(&cpu_work->work, set_cpu_work);
-	init_completion(&cpu_work->complete);
-#endif
+	/* do not switch frequencies unless explicitly asked us to */
+	policy->max = sprd_cpufreq_conf->freq_tbl[NOC].frequency ;
+	policy->min = sprd_cpufreq_conf->freq_tbl[NOC].frequency ;
+	cpufreq_frequency_table_get_attr(sprd_cpufreq_conf->freq_tbl, policy->cpu);
+
+	pr_info("cpufreq_init: policy: cpu=%d, cur=%u, min=%u, max=%u, ret=%d\n",
+			policy->cpu, policy->cur, policy->min,policy->max, ret);
 
 	return ret;
+}
+
+static int sprd_cpufreq_exit(struct cpufreq_policy *policy)
+{
+	/* empty for now  */
+	return 0;
 }
 
 static struct freq_attr *sprd_cpufreq_attr[] = {
@@ -444,74 +348,150 @@ static struct freq_attr *sprd_cpufreq_attr[] = {
 	NULL,
 };
 
+ssize_t sprd_vdd_get(char *buf) {
+	int i, len = 0;
+	for (i = 0; i <= MIN_CL; i++) {
+		len += sprintf(buf + len, "%umhz: %lu mV\n", sprd_cpufreq_conf->freq_tbl[i].frequency / 1000, sprd_cpufreq_conf->vdduv_tbl[i] / 1000);
+	}
+	return len;
+}
+
+void sprd_vdd_set(const char *buf) {
+	int ret = -EINVAL;
+	int i = 0;
+	int j = 0;
+	int u[MIN_CL + 1];
+	while (j < MIN_CL + 1) {
+		int consumed;
+		int val;
+		ret = sscanf(buf, "%d%n", &val, &consumed);
+		if (ret > 0) {
+			buf += consumed;
+			u[j++] = val;
+		}
+		else {
+			break;
+		}
+	}
+
+	for (i = 0; i < j; i++) {
+		if (u[i] > ARMVOLT_MAX / 1000) {
+			u[i] = ARMVOLT_MAX / 1000;
+		}
+         if( u[i] % 25 == 0 ) {
+		 sprd_cpufreq_conf->vdduv_tbl[i] = u[i] * 1000; }
+	}
+   return;
+}
+
+static struct vdd_levels_control sprd_vdd_control = {
+      .get = sprd_vdd_get,
+      .set = sprd_vdd_set,
+};
+
 static struct cpufreq_driver sprd_cpufreq_driver = {
-	.owner		= THIS_MODULE,
-	.flags      = CPUFREQ_STICKY,
 	.verify		= sprd_cpufreq_verify_speed,
-	.target		= sprd_cpufreq_set_target,
-	.get		= sprd_cpufreq_get_speed,
-	.init		= sprd_cpufreq_driver_init,
-	.name		= "sprd_cpufreq",
+	.target		= sprd_cpufreq_target,
+	.get		= sprd_cpufreq_getspeed,
+	.init		= sprd_cpufreq_init,
+	.exit		= sprd_cpufreq_exit,
+	.name		= "cpufreq_sc8810",
 	.attr		= sprd_cpufreq_attr,
+	.volt_control = &sprd_vdd_control ,
 };
 
-static int sprd_cpufreq_suspend(void)
+
+static int sprd_cpufreq_policy_notifier(
+		struct notifier_block *nb, unsigned long event, void *data)
 {
-	int cpu;
-
-	for_each_possible_cpu(cpu) {
-		mutex_lock(&per_cpu(cpufreq_suspend, cpu).suspend_mutex);
-		per_cpu(cpufreq_suspend, cpu).device_suspended = 1;
-		mutex_unlock(&per_cpu(cpufreq_suspend, cpu).suspend_mutex);
-	}
-
-	return NOTIFY_DONE;
+	/* empty for now */
+	return NOTIFY_OK;
 }
 
-static int sprd_cpufreq_resume(void)
-{
-	int cpu;
-
-	for_each_possible_cpu(cpu) {
-		per_cpu(cpufreq_suspend, cpu).device_suspended = 0;
-	}
-
-	return NOTIFY_DONE;
-}
-
-static int sprd_cpufreq_pm_event(struct notifier_block *this,
-				unsigned long event, void *ptr)
-{
-	switch (event) {
-	case PM_POST_HIBERNATION:
-	case PM_POST_SUSPEND:
-		return sprd_cpufreq_resume();
-	case PM_HIBERNATION_PREPARE:
-	case PM_SUSPEND_PREPARE:
-		return sprd_cpufreq_suspend();
-	default:
-		return NOTIFY_DONE;
-	}
-}
-
-static struct notifier_block sprd_cpufreq_pm_notifier = {
-	.notifier_call = sprd_cpufreq_pm_event,
+static struct notifier_block sprd_cpufreq_policy_nb = {
+	.notifier_call = sprd_cpufreq_policy_notifier,
 };
 
-static int __init sprd_cpufreq_register(void){
-	int cpu;
+static int __init sprd_cpufreq_modinit(void)
+{
+	int ret;  
+	unsigned int reg_success = 0x1;
 
-	for_each_possible_cpu(cpu) {
-		mutex_init(&(per_cpu(cpufreq_suspend, cpu).suspend_mutex));
-		per_cpu(cpufreq_suspend, cpu).device_suspended = 0;
+	pr_info("cpufreq driver module for sc8810 initializing.. \n"); 
+	pr_info("number of cpus %d \n", NR_CPUS);
+
+
+	/* skip checks for if  we are actually running an sc8810 chip for now */
+	sprd_cpufreq_conf = &sc8810_cpufreq_conf;
+	sprd_gen_freq_table();
+
+	sprd_cpufreq_conf->clk = clk_get_sys(NULL, "mpll_ck");
+	if (IS_ERR(sprd_cpufreq_conf->clk)) {
+		pr_err("modinit: unable to get clk_mcu %ld\n",
+				PTR_ERR(sprd_cpufreq_conf->clk) );
+		return 0;
+	} else {
+		pr_info("modinit: got clk_mcu" );
 	}
 
-#ifdef CONFIG_SMP
-	sprd_cpufreq_wq = create_workqueue("sprd-cpufreq");
-#endif
 
-	register_pm_notifier(&sprd_cpufreq_pm_notifier);
-	return cpufreq_register_driver(&sprd_cpufreq_driver);
+	sprd_cpufreq_conf->regulator = regulator_get(NULL, "VDDARM");
+	if (IS_ERR(sprd_cpufreq_conf->regulator)) { 
+		pr_err("modinit: unable to get regulator %ld\n",
+				PTR_ERR(sprd_cpufreq_conf->regulator ) );
+		return 0;
+	} else {
+		pr_info("modinit: got regulator" );
+	}
+
+	boot_time = jiffies + msecs_to_jiffies(WAIT_BOOT_TIME*1000);
+	trans_time = boot_time - msecs_to_jiffies(WAIT_TRANS_TIME);
+	global_freqs.old = sprd_raw_getfreq();
+
+	pr_info("modinit: old_frequency: %dKhz, old_volt: %lu mV",  global_freqs.old, sprd_raw_getvolt() / 1000 );
+
+	ret = cpufreq_register_driver(&sprd_cpufreq_driver); 
+
+	if (!ret){
+		pr_info("sucessufully registered cpufreq driver \n");
+	} else { 
+		pr_err("unable to register cpufreq driver %d\n", ret);
+		reg_success = 0; 
+		return 0;
+	}
+
+	ret = cpufreq_register_notifier(
+			&sprd_cpufreq_policy_nb, CPUFREQ_POLICY_NOTIFIER);
+
+	if (!ret){
+		pr_info("sucessufully registered cpufreq notifier \n");
+	} else { 
+		pr_err("unable to register cpufreq notifier %d\n",ret);
+		reg_success = 0; 
+	}
+
+	if(!reg_success) {
+		regulator_put(sprd_cpufreq_conf->regulator);
+	} 
+	return 0;
 }
 
-late_initcall(sprd_cpufreq_register);
+static void __exit sprd_cpufreq_modexit(void)
+{
+	if (!IS_ERR_OR_NULL(sprd_cpufreq_conf->regulator))
+		regulator_put(sprd_cpufreq_conf->regulator);
+
+	pr_info("unregistering  driver \n"); cpufreq_unregister_driver(&sprd_cpufreq_driver);
+
+	pr_info("unregistering notifier \n");
+	cpufreq_unregister_notifier(
+			&sprd_cpufreq_policy_nb, CPUFREQ_POLICY_NOTIFIER);
+
+}
+
+module_init(sprd_cpufreq_modinit);
+module_exit(sprd_cpufreq_modexit);
+
+MODULE_AUTHOR("Psych Half, <psych.half@gmail.com>");
+MODULE_DESCRIPTION("cpufreq driver for sc8810");
+MODULE_LICENSE("GPL");
