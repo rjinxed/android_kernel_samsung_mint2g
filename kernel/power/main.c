@@ -383,6 +383,7 @@ static ssize_t cpufreq_table_show(struct kobject *kobj,
 {
 	unsigned int i = 0;
 	ssize_t count = 0;
+
 	struct cpufreq_table_data *table_data;
 	struct cpufreq_frequency_table *table=table_data->freq_tbl; 
 
