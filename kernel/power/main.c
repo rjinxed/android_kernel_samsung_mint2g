@@ -371,14 +371,20 @@ cpufreq_max_limit_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 power_attr(cpufreq_max_limit);
 
-extern struct cpufreq_frequency_table sc8810g_freq_table[];
+// Add support for Psych Half's cpu frequency module .
+#define FREQ_TABLE_SIZE 	(11)
+extern struct cpufreq_table_data {
+	struct cpufreq_frequency_table 		freq_tbl[FREQ_TABLE_SIZE];
+	unsigned long				vdduv_tbl[FREQ_TABLE_SIZE];
+};
 static ssize_t cpufreq_table_show(struct kobject *kobj,
 				       struct kobj_attribute *attr,
 				       char *buf)
 {
 	unsigned int i = 0;
 	ssize_t count = 0;
-	struct cpufreq_frequency_table *table = sc8810g_freq_table;
+	struct cpufreq_table_data *table_data;
+	struct cpufreq_frequency_table *table=table_data->freq_tbl; 
 
 	for (i = 0; (table[i].frequency != CPUFREQ_TABLE_END); i++) {
 		if (table[i].frequency == CPUFREQ_ENTRY_INVALID)
