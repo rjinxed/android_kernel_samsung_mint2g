@@ -96,7 +96,7 @@ enum clocking_levels {
 	OC2,OC1,	/* over clock */
 	NOC, UC0=NOC, OC0=NOC,	/* no over or under clock */
 	UC1, UC2, UC3, UC4,	/* under clock */
-	MAX_CL=OC3,MIN_CL=UC4,
+	MAX_CL=OC2,MIN_CL=UC4,
 	EC, 			/* end of clocking */
 };
 
