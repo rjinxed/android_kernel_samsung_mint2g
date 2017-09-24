@@ -15,7 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/err.h>
 #include <linux/hrtimer.h>
-#include <../../../drivers/staging/android/timed_output.h>
+#include <../../../drivers/android/timed_output.h>
 #include <linux/sched.h>
 #include <mach/hardware.h>
 #include <mach/adi.h>

@@ -6,6 +6,8 @@
 # Copyright (C) 2011, Red Bend Ltd.
 #
 
+obj-$(CONFIG_ANDROID)		+= android/
+
 obj-y				+= gpio/
 obj-$(CONFIG_PCI)		+= pci/
 obj-$(CONFIG_PARISC)		+= parisc/
