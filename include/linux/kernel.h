@@ -22,6 +22,8 @@
 #include <asm/byteorder.h>
 #include <asm/bug.h>
 
+#define SIZE_MAX	(~(size_t)0)
+
 #define USHRT_MAX	((u16)(~0U))
 #define SHRT_MAX	((s16)(USHRT_MAX>>1))
 #define SHRT_MIN	((s16)(-SHRT_MAX - 1))
