@@ -1665,7 +1665,7 @@ static int binder_translate_binder(struct flat_binder_object *fp,
 	fp->cookie = 0;
 	binder_inc_ref(ref, fp->hdr.type == BINDER_TYPE_HANDLE, &thread->todo);
 
-	trace_binder_transaction_node_to_ref(t, node, ref);
+	//trace_binder_transaction_node_to_ref(t, node, ref);
 	binder_debug(BINDER_DEBUG_TRANSACTION,
 		     "        node %d u%016llx -> ref %d desc %d\n",
 		     node->debug_id, (u64)node->ptr,
@@ -1701,7 +1701,7 @@ static int binder_translate_handle(struct flat_binder_object *fp,
 		fp->cookie = ref->node->cookie;
 		binder_inc_node(ref->node, fp->hdr.type == BINDER_TYPE_BINDER,
 				0, NULL);
-		trace_binder_transaction_ref_to_node(t, ref);
+		//trace_binder_transaction_ref_to_node(t, ref);
 		binder_debug(BINDER_DEBUG_TRANSACTION,
 			     "        ref %d desc %d -> node %d u%016llx\n",
 			     ref->debug_id, ref->desc, ref->node->debug_id,
@@ -1718,7 +1718,7 @@ static int binder_translate_handle(struct flat_binder_object *fp,
 		fp->cookie = 0;
 		binder_inc_ref(new_ref, fp->hdr.type == BINDER_TYPE_HANDLE,
 			       NULL);
-		trace_binder_transaction_ref_to_ref(t, ref, new_ref);
+		//trace_binder_transaction_ref_to_ref(t, ref, new_ref);
 		binder_debug(BINDER_DEBUG_TRANSACTION,
 			     "        ref %d desc %d -> ref %d desc %d (node %d)\n",
 			     ref->debug_id, ref->desc, new_ref->debug_id,
@@ -1771,7 +1771,7 @@ static int binder_translate_fd(int fd,
 		goto err_get_unused_fd;
 	}
 	task_fd_install(target_proc, target_fd, file);
-	trace_binder_transaction_fd(t, fd, target_fd);
+	//trace_binder_transaction_fd(t, fd, target_fd);
 	binder_debug(BINDER_DEBUG_TRANSACTION, "        fd %d -> %d\n",
 		     fd, target_fd);
 
@@ -3205,7 +3205,7 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 		if (bwr.write_size > 0) {
 			ret = binder_thread_write(proc, thread, bwr.write_buffer, bwr.write_size, &bwr.write_consumed);
-			trace_binder_write_done(ret);
+			//trace_binder_write_done(ret);
 			if (ret < 0) {
 				bwr.read_consumed = 0;
 				if (copy_to_user(ubuf, &bwr, sizeof(bwr)))
@@ -3215,7 +3215,7 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		}
 		if (bwr.read_size > 0) {
 			ret = binder_thread_read(proc, thread, bwr.read_buffer, bwr.read_size, &bwr.read_consumed, filp->f_flags & O_NONBLOCK);
-			trace_binder_read_done(ret);
+			//trace_binder_read_done(ret);
 			if (!list_empty(&proc->todo))
 				wake_up_interruptible(&proc->wait);
 			if (ret < 0) {
@@ -3299,7 +3299,7 @@ err:
 	if (ret && ret != -ERESTARTSYS)
 		pr_info("%d:%d ioctl %x %lx returned %d\n", proc->pid, current->pid, cmd, arg, ret);
 err_unlocked:
-	trace_binder_ioctl_done(ret);
+	//trace_binder_ioctl_done(ret);
 	return ret;
 }
 
