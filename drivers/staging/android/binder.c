@@ -3447,7 +3447,7 @@ static int binder_open(struct inode *nodp, struct file *filp)
 				  miscdev);
 	proc->context = &binder_dev->context;
 
-	binder_lock(__func__);
+	//binder_lock(__func__); error: called object 'binder_lock' is not a function or function pointer
 
 	binder_stats_created(BINDER_STAT_PROC);
 	hlist_add_head(&proc->proc_node, &binder_procs);
@@ -4098,8 +4098,8 @@ static int binder_proc_show(struct seq_file *m, void *unused)
 	struct hlist_node *pos;
 	int do_lock = !binder_debug_no_lock;
 
-	if (do_lock)
-		binder_lock(__func__);
+	/*if (do_lock)
+		//binder_lock(__func__); error: called object 'binder_lock' is not a function or function pointer */
 
 	hlist_for_each_entry(itr, pos, &binder_procs, proc_node) {
 		if (itr->pid == pid) {
