@@ -1274,6 +1274,8 @@ int check_unsafe_exec(struct linux_binprm *bprm)
 	return res;
 }
 
+<<<<<<< HEAD
+=======
 static void bprm_fill_uid(struct linux_binprm *bprm)
 {
 	struct inode *inode;
@@ -1314,6 +1316,7 @@ static void bprm_fill_uid(struct linux_binprm *bprm)
 	}
 }
 
+>>>>>>> b46e150... sched: move no_new_privs into new atomic flags
 /* 
  * Fill the binprm structure from the inode. 
  * Check permissions, then read the first 128 (BINPRM_BUF_SIZE) bytes
