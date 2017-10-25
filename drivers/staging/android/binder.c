@@ -534,7 +534,7 @@ out_unlock:
 }
 
 
-static inline void binder_lock(const char *tag)
+/*static inline void binder_lock(const char *tag)
 {
 	trace_binder_lock(tag);
 	mutex_lock(&binder_main_lock);
@@ -546,7 +546,7 @@ static inline void binder_unlock(const char *tag)
 	trace_binder_unlock(tag);
 	mutex_unlock(&binder_main_lock);
 }
-
+*/
 static void binder_set_nice(long nice)
 {
 	long min_nice;
@@ -3461,7 +3461,8 @@ static int binder_open(struct inode *nodp, struct file *filp)
 				  miscdev);
 	proc->context = &binder_dev->context;
 
-	binder_lock(__func__); //error: called object 'binder_lock' is not a function or function pointer
+	//binder_lock(__func__); //error: called object 'binder_lock' is not a function or function pointer
+	mutex_lock(&binder_lock);
 
 	binder_stats_created(BINDER_STAT_PROC);
 	hlist_add_head(&proc->proc_node, &binder_procs);
@@ -4113,7 +4114,8 @@ static int binder_proc_show(struct seq_file *m, void *unused)
 	int do_lock = !binder_debug_no_lock;
 
 	if (do_lock)
-		binder_lock(__func__); //error: called object 'binder_lock' is not a function or function pointer */
+		//binder_lock(__func__); //error: called object 'binder_lock' is not a function or function pointer */
+		mutex_lock(&binder_lock);
 
 	hlist_for_each_entry(itr, pos, &binder_procs, proc_node) {
 		if (itr->pid == pid) {
