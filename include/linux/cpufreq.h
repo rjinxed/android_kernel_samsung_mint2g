@@ -21,7 +21,6 @@
 #include <linux/workqueue.h>
 #include <linux/cpumask.h>
 #include <asm/div64.h>
-#include <asm/cputime.h>
 
 #define CPUFREQ_NAME_LEN 16
 
@@ -239,6 +238,11 @@ struct cpufreq_driver {
 	int	(*suspend)	(struct cpufreq_policy *policy);
 	int	(*resume)	(struct cpufreq_policy *policy);
 	struct freq_attr	**attr;
+
+#ifdef CONFIG_USERSPACE_VOLTAGE_CONTROL
+    ssize_t (*get_vdd_uv) (char *buf);
+    void (*set_vdd_uv) (const char *buf);
+#endif
 };
 
 /* flags */
@@ -405,11 +409,5 @@ void cpufreq_frequency_table_get_attr(struct cpufreq_frequency_table *table,
 
 void cpufreq_frequency_table_put_attr(unsigned int cpu);
 
-
-/*********************************************************************
- *                         CPUFREQ STATS                             *
- *********************************************************************/
-
-void acct_update_power(struct task_struct *p, cputime_t cputime);
 
 #endif /* _LINUX_CPUFREQ_H */
