@@ -95,32 +95,28 @@ struct cpufreq_table_data {
 enum clocking_levels {
 	OC2,OC1,	/* over clock */
 	NOC, UC0=NOC, OC0=NOC,	/* no over or under clock */
-	UC1, UC2, UC3, UC4,	/* under clock */
-	MAX_CL=OC2,MIN_CL=UC4,
+	UC1, UC2,	/* under clock */
+	MAX_CL=OC2,MIN_CL=UC2,
 	EC, 			/* end of clocking */
 };
 
 static struct cpufreq_table_data sc8810_cpufreq_table_data = {
 	/* multiplier should be a multiple of 4 to allow efficient scaling */
 	.freq_tbl = {		/* M*25 */
-		{OC2, 1200000},	/*  48  */
-		{OC1, 1100000},	/*  44  */
+		{OC2, 1260000}, /*  50  */
+		{OC1, 1200000},	/*  48  */
 		{NOC, 1000000},	/*  40  */
-		{UC1, 900000},  /*  36  */
-		{UC2, 800000},  /*  32  */
-		{UC3, 700000},  /*  28  */
-		{UC4, 600000},  /*  24  */
+		{UC1, 800000},  /*  32  */
+		{UC2, 600000},  /*  24  */
 		{EC, CPUFREQ_TABLE_END},
 	},
 	/* 50mV steps */
 	.vdduv_tbl = {
-	[OC2] =	950000,
-	[OC1] =	900000,
+	[OC2] = 980000,
+	[OC1] =	950000,
 	[NOC] =	850000,
-	[UC1] =	800000,
-	[UC2] =	750000,
-	[UC3] =	700000,
-	[UC4] =	650000,
+	[UC1] =	750000,
+	[UC2] =	650000,
 	[EC] =	1100000,
 	},
 };
